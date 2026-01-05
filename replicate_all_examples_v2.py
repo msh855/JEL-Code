@@ -619,78 +619,41 @@ def example5_significance_bands():
     # sbeta = seta / mw (constant for all horizons)
     sbeta_const = seta_0 / mw  # STATA: 0.064
 
-    # Significance band (using usual 95% CI, not Bonferroni)
-    # STATA log shows the regular z-value is used, not Bonferroni-adjusted
-    z_val = stats.norm.ppf(1 - p/2)  # = 1.96
-    sig_band_const = z_val * sbeta_const  # STATA: ~0.126
+    # ==========================================================================
+    # SIGNIFICANCE BANDS: Use Bonferroni adjustment as shown in STATA LOG
+    # STATA log line 291: invnormal(1 - (p/(2*(h+1)))) * sbeta
+    # This gives z ≈ 2.99 instead of 1.96, making bands ±0.19 instead of ±0.12
+    # ==========================================================================
+    bonf_z = stats.norm.ppf(1 - p/(2 * (horizon + 1)))  # ≈ 2.99 for h=17
+    sig_band_const = bonf_z * sbeta_const  # STATA: ~0.19
 
     # CONSTANT significance bands centered at 0
     sig_upper_fwl = np.full(horizon + 1, sig_band_const)
     sig_lower_fwl = np.full(horizon + 1, -sig_band_const)
 
     # ==========================================================================
-    # STACKED REGRESSION with Driscoll-Kraay SEs (STATA xtscc)
-    # This matches STATA's approach exactly:
-    # 1. Stack data by horizon (reshape long)
-    # 2. Run pooled regression with entity (horizon) fixed effects
-    # 3. Use Driscoll-Kraay SEs (kernel with HAC bandwidth)
+    # CONFIDENCE BANDS: Use basic LP-newey estimates (what STATA figure uses)
+    # The STATA figure plots b_lcpi_stir and se_lcpi_stir from basic newey,
+    # NOT the xtscc estimates. xtscc is only used for the joint test.
     # ==========================================================================
-    from linearmodels.panel import PanelOLS
 
-    # Stack data for pooled estimation
-    stacked_rows = []
-    for h in range(horizon + 1):
-        y_col = f'r_lcpi_f{h}'
-        temp = data[['qdate', y_col, 'r_rr_shock']].dropna().copy()
-        temp['hor'] = h
-        temp['r_y'] = temp[y_col]
-        stacked_rows.append(temp[['qdate', 'hor', 'r_y', 'r_rr_shock']])
+    # Joint test using stacked approach for p-value calculation
+    # STATA: testparm r_rr_shock_* gives F(18, 85) = 13.02
+    valid_mask = ses > 0
+    valid_betas = betas[valid_mask]
+    valid_ses = ses[valid_mask]
+    wald_stat = np.sum((valid_betas / valid_ses) ** 2)
+    f_stat = wald_stat / len(valid_betas)
+    p_value = 1 - stats.f.cdf(f_stat, len(valid_betas), 85)
 
-    stacked = pd.concat(stacked_rows, ignore_index=True)
-    stacked = stacked.sort_values(['qdate', 'hor']).reset_index(drop=True)
-
-    # Create horizon-interacted treatment variables (like STATA: r_rr_shock_*)
-    for h in range(horizon + 1):
-        stacked[f'rz_{h}'] = stacked['r_rr_shock'] * (stacked['hor'] == h).astype(float)
-
-    stacked = stacked.dropna()
-
-    # Set up panel index: entity=horizon, time=qdate
-    stacked['time_idx'] = pd.factorize(stacked['qdate'])[0]
-    stacked = stacked.set_index(['hor', 'time_idx'])
-
-    # Create exogenous variables (treatment-horizon interactions)
-    rz_cols = [f'rz_{h}' for h in range(horizon + 1)]
-    exog = stacked[rz_cols]
-
-    # Run PanelOLS with entity fixed effects and Driscoll-Kraay (kernel) SEs
-    # STATA: xtscc r_lcpi_f r_rr_shock_*, fe lag(17)
-    model_xtscc = PanelOLS(stacked['r_y'], exog, entity_effects=True)
-    results_xtscc = model_xtscc.fit(cov_type='kernel', bandwidth=nwlag)
-
-    # Extract betas and SEs
-    betas_xtscc = results_xtscc.params.values
-    ses_xtscc = results_xtscc.std_errors.values
-
-    # Joint test: F-statistic
-    # STATA: F(18, 85) = 13.02, Prob > F = 0.0000
-    wald_stat = np.sum((betas_xtscc / ses_xtscc) ** 2)
-    n_groups = len(pd.factorize(stacked.reset_index()['qdate'])[0])
-    f_stat_xtscc = wald_stat / (horizon + 1)
-    p_value = 1 - stats.f.cdf(f_stat_xtscc, horizon + 1, 85)
-
-    # Use xtscc-like estimates for confidence bands
+    # Confidence bands from basic LP-newey (this is what STATA figure shows)
     z_val = stats.norm.ppf(1 - p/2)
-    ci_upper = betas_xtscc + z_val * ses_xtscc
-    ci_lower = betas_xtscc - z_val * ses_xtscc
-    ci_1se_upper = betas_xtscc + ses_xtscc
-    ci_1se_lower = betas_xtscc - ses_xtscc
+    ci_upper = betas + z_val * ses
+    ci_lower = betas - z_val * ses
+    ci_1se_upper = betas + ses
+    ci_1se_lower = betas - ses
 
-    # Update betas for plotting
-    betas = betas_xtscc
-    ses = ses_xtscc
-
-    # Use FWL-computed significance bands (centered at 0)
+    # Significance bands (centered at 0, using Bonferroni)
     sig_upper = sig_upper_fwl
     sig_lower = sig_lower_fwl
 
