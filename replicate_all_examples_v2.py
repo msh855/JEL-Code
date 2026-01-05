@@ -502,7 +502,12 @@ def example5_significance_bands():
     Variables:
     - y: lcpi (log CPI, scaled by 100)
     - z: rr_shock (Romer-Romer monetary shock)
-    - Controls: l(1/4).dlrgdp, l(1/4).dlcpi, l(1/4).dstir
+    - Controls: l(1/6).dlrgdp, l(1/6).dlcpi, l(1/6).dstir
+
+    STATA Log shows:
+    - lags = 6 (not 4 as in do file)
+    - N = 86 observations after dropping missing
+    - Uses Frisch-Waugh-Lovell for significance bands
     """
     print("\n" + "=" * 70)
     print("EXAMPLE 5: Significance Bands")
@@ -522,9 +527,9 @@ def example5_significance_bands():
 
     print(f"  Sample size: {len(data)}")
 
-    # Parameters
+    # Parameters - NOTE: STATA log shows lags=6, not 4 as in do file
     horizon = 17
-    lags = 4
+    lags = 6  # From STATA log line 112
     nwlag = horizon
     p = 0.05
 
@@ -534,7 +539,7 @@ def example5_significance_bands():
         data[f'lcpi_f{h}'] = data['lcpi'].shift(-h) - data['lcpi'].shift(1)
 
     # Create lagged controls (lines 89)
-    # l(1/4).dlrgdp l(1/4).dlcpi l(1/4).dstir
+    # l(1/6).dlrgdp l(1/6).dlcpi l(1/6).dstir
     control_cols = []
     for var in ['dlrgdp', 'dlcpi', 'dstir']:
         for lag in range(1, lags + 1):
@@ -543,7 +548,7 @@ def example5_significance_bands():
             control_cols.append(col)
 
     # Reduced form LP estimation (lines 87-96)
-    # newey lcpi_f{i} rr_shock l(1/4).dlrgdp l(1/4).dlcpi l(1/4).dstir, lag(nwlag)
+    # newey lcpi_f{i} rr_shock l(1/6).dlrgdp l(1/6).dlcpi l(1/6).dstir, lag(nwlag)
     betas = np.zeros(horizon + 1)
     ses = np.zeros(horizon + 1)
 
@@ -561,26 +566,133 @@ def example5_significance_bands():
         betas[h] = results.params['rr_shock']
         ses[h] = results.bse['rr_shock']
 
-    # Joint test (F-test equivalent)
-    valid_mask = ses > 0
-    valid_betas = betas[valid_mask]
-    valid_ses = ses[valid_mask]
+    # ==========================================================================
+    # Compute SIGNIFICANCE BANDS using Frisch-Waugh-Lovell approach (STATA method)
+    # This follows STATA's sbands_RR.do exactly:
+    # 1. Orthogonalize lcpi_f{h} wrt controls -> r_lcpi_f{h}
+    # 2. Orthogonalize rr_shock wrt controls -> r_rr_shock
+    # 3. eta_h = r_lcpi_f{h} * r_rr_shock
+    # 4. sbeta_h = HAC_SE(mean(eta_h)) / E[r_rr_shock^2]
+    # 5. sig_band = ± z * sbeta_h
+    # ==========================================================================
+    def orthogonalize(y_var, controls, df):
+        """Orthogonalize y_var with respect to controls"""
+        reg_data = df[[y_var] + controls].dropna()
+        if len(reg_data) < len(controls) + 5:
+            return pd.Series(index=df.index, dtype=float)
+        X = sm.add_constant(reg_data[controls])
+        results = OLS(reg_data[y_var], X).fit()
+        resid = pd.Series(index=df.index, dtype=float)
+        resid.loc[reg_data.index] = results.resid
+        return resid
 
-    # Use F-test approximation
-    f_stat = np.sum((valid_betas / valid_ses) ** 2) / len(valid_betas)
-    p_value = 1 - stats.f.cdf(f_stat, len(valid_betas), 100)
+    # Orthogonalize rr_shock
+    data['r_rr_shock'] = orthogonalize('rr_shock', control_cols, data)
 
-    # Confidence bands
+    # Orthogonalize forward y variables
+    for h in range(horizon + 1):
+        data[f'r_lcpi_f{h}'] = orthogonalize(f'lcpi_f{h}', control_cols, data)
+
+    # Compute E[r_z^2] = mean of squared orthogonalized shock
+    valid_rz = data['r_rr_shock'].dropna()
+    mw = (valid_rz ** 2).mean()  # STATA: _b[_cons] from reg w
+
+    # ==========================================================================
+    # STATA LOG shows significance bands computed from h=0 ONLY and applied
+    # as CONSTANT bands across all horizons:
+    # gen eta = r_lcpi_f0 * r_rr_shock  (only h=0!)
+    # newey eta, lag(17)
+    # sbeta = seta / mw = 0.003062 / 0.0478 = 0.064
+    # bju = z * sbeta = 1.96 * 0.064 = 0.126 (constant for all h)
+    # ==========================================================================
+
+    # Compute eta from h=0 only (as in STATA log)
+    eta_data_0 = data[['r_lcpi_f0', 'r_rr_shock']].dropna()
+    eta_0 = eta_data_0['r_lcpi_f0'] * eta_data_0['r_rr_shock']
+
+    # Compute HAC standard error of mean(eta_0)
+    eta_arr_0 = eta_0.values
+    X_const_0 = np.ones((len(eta_arr_0), 1))
+    eta_model_0 = OLS(eta_arr_0, X_const_0).fit(cov_type='HAC', cov_kwds={'maxlags': nwlag})
+    seta_0 = eta_model_0.bse[0]  # STATA: 0.003062
+
+    # sbeta = seta / mw (constant for all horizons)
+    sbeta_const = seta_0 / mw  # STATA: 0.064
+
+    # Significance band (using usual 95% CI, not Bonferroni)
+    # STATA log shows the regular z-value is used, not Bonferroni-adjusted
+    z_val = stats.norm.ppf(1 - p/2)  # = 1.96
+    sig_band_const = z_val * sbeta_const  # STATA: ~0.126
+
+    # CONSTANT significance bands centered at 0
+    sig_upper_fwl = np.full(horizon + 1, sig_band_const)
+    sig_lower_fwl = np.full(horizon + 1, -sig_band_const)
+
+    # ==========================================================================
+    # STACKED REGRESSION with Driscoll-Kraay SEs (STATA xtscc)
+    # This matches STATA's approach exactly:
+    # 1. Stack data by horizon (reshape long)
+    # 2. Run pooled regression with entity (horizon) fixed effects
+    # 3. Use Driscoll-Kraay SEs (kernel with HAC bandwidth)
+    # ==========================================================================
+    from linearmodels.panel import PanelOLS
+
+    # Stack data for pooled estimation
+    stacked_rows = []
+    for h in range(horizon + 1):
+        y_col = f'r_lcpi_f{h}'
+        temp = data[['qdate', y_col, 'r_rr_shock']].dropna().copy()
+        temp['hor'] = h
+        temp['r_y'] = temp[y_col]
+        stacked_rows.append(temp[['qdate', 'hor', 'r_y', 'r_rr_shock']])
+
+    stacked = pd.concat(stacked_rows, ignore_index=True)
+    stacked = stacked.sort_values(['qdate', 'hor']).reset_index(drop=True)
+
+    # Create horizon-interacted treatment variables (like STATA: r_rr_shock_*)
+    for h in range(horizon + 1):
+        stacked[f'rz_{h}'] = stacked['r_rr_shock'] * (stacked['hor'] == h).astype(float)
+
+    stacked = stacked.dropna()
+
+    # Set up panel index: entity=horizon, time=qdate
+    stacked['time_idx'] = pd.factorize(stacked['qdate'])[0]
+    stacked = stacked.set_index(['hor', 'time_idx'])
+
+    # Create exogenous variables (treatment-horizon interactions)
+    rz_cols = [f'rz_{h}' for h in range(horizon + 1)]
+    exog = stacked[rz_cols]
+
+    # Run PanelOLS with entity fixed effects and Driscoll-Kraay (kernel) SEs
+    # STATA: xtscc r_lcpi_f r_rr_shock_*, fe lag(17)
+    model_xtscc = PanelOLS(stacked['r_y'], exog, entity_effects=True)
+    results_xtscc = model_xtscc.fit(cov_type='kernel', bandwidth=nwlag)
+
+    # Extract betas and SEs
+    betas_xtscc = results_xtscc.params.values
+    ses_xtscc = results_xtscc.std_errors.values
+
+    # Joint test: F-statistic
+    # STATA: F(18, 85) = 13.02, Prob > F = 0.0000
+    wald_stat = np.sum((betas_xtscc / ses_xtscc) ** 2)
+    n_groups = len(pd.factorize(stacked.reset_index()['qdate'])[0])
+    f_stat_xtscc = wald_stat / (horizon + 1)
+    p_value = 1 - stats.f.cdf(f_stat_xtscc, horizon + 1, 85)
+
+    # Use xtscc-like estimates for confidence bands
     z_val = stats.norm.ppf(1 - p/2)
-    ci_upper = betas + z_val * ses
-    ci_lower = betas - z_val * ses
-    ci_1se_upper = betas + ses
-    ci_1se_lower = betas - ses
+    ci_upper = betas_xtscc + z_val * ses_xtscc
+    ci_lower = betas_xtscc - z_val * ses_xtscc
+    ci_1se_upper = betas_xtscc + ses_xtscc
+    ci_1se_lower = betas_xtscc - ses_xtscc
 
-    # Significance bands (sup-t / Bonferroni)
-    bonf_z = stats.norm.ppf(1 - p/(2 * (horizon + 1)))
-    sig_upper = bonf_z * ses
-    sig_lower = -bonf_z * ses
+    # Update betas for plotting
+    betas = betas_xtscc
+    ses = ses_xtscc
+
+    # Use FWL-computed significance bands (centered at 0)
+    sig_upper = sig_upper_fwl
+    sig_lower = sig_lower_fwl
 
     h_arr = np.arange(horizon + 1)
 
