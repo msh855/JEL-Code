@@ -527,9 +527,10 @@ def example5_significance_bands():
 
     print(f"  Sample size: {len(data)}")
 
-    # Parameters - NOTE: STATA log shows lags=6, not 4 as in do file
+    # Parameters - STATA do file line 53 shows lags=4
+    # (log shows lags=6 but figures appear to use lags=4)
     horizon = 17
-    lags = 6  # From STATA log line 112
+    lags = 4  # From STATA do file line 53
     nwlag = horizon
     p = 0.05
 
@@ -539,7 +540,7 @@ def example5_significance_bands():
         data[f'lcpi_f{h}'] = data['lcpi'].shift(-h) - data['lcpi'].shift(1)
 
     # Create lagged controls (lines 89)
-    # l(1/6).dlrgdp l(1/6).dlcpi l(1/6).dstir
+    # l(1/lags).dlrgdp l(1/lags).dlcpi l(1/lags).dstir
     control_cols = []
     for var in ['dlrgdp', 'dlcpi', 'dstir']:
         for lag in range(1, lags + 1):
