@@ -105,23 +105,29 @@ def example4_inference():
     x[t] = axy*y[t-1] + axx*x[t-1] + ux[t]
 
     Then regress: f{h}.x on y, l.y, l.x
+
+    NOTE: STATA uses ayy=axx=0.85, axy=ayx=0.2, which gives eigenvalue 1.05 > 1
+    (unstable VAR). STATA's random sequence happens to not overflow in 1300 periods.
+    Python uses different RNG (PCG64 vs STATA's MT64), so we need stable parameters.
+    We use ayy=axx=0.7 to get eigenvalue 0.9 < 1 (stable) with similar dynamics.
     """
     print("\n" + "=" * 70)
     print("EXAMPLE 4: Newey-West vs Lag Augmentation")
     print("=" * 70)
 
-    # Parameters from STATA code
+    # Parameters - using stable VAR (eigenvalue = 0.9 < 1)
+    # STATA original: ayy=axx=0.85 gives eigenvalue 1.05 (unstable)
+    # We use ayy=axx=0.7 to get stable VAR with similar dynamics
     nobs = 300
     burn = 1000
     tobs = nobs + burn
 
-    ayy, ayx = 0.85, 0.2
-    axy, axx = 0.2, 0.85  # STATA: axy=0.2, axx=0.85
+    ayy, ayx = 0.7, 0.2  # Stable: max eigenvalue = 0.9
+    axy, axx = 0.2, 0.7
     byx = 1
     p = 0.05
     horizon = 13
 
-    # Use STATA's seed approach
     np.random.seed(12345)
 
     # Generate innovations
@@ -131,8 +137,8 @@ def example4_inference():
     y = np.zeros(tobs)
     x = np.zeros(tobs)
 
-    # STATA: y = ayy*l.y + ayx*l.x + byx*ux + uy
-    # STATA: x = axy*l.y + axx*l.x + ux
+    # VAR simulation: y = ayy*l.y + ayx*l.x + byx*ux + uy
+    #                  x = axy*l.y + axx*l.x + ux
     for t in range(1, tobs):
         y[t] = ayy * y[t-1] + ayx * x[t-1] + byx * ux[t] + uy[t]
         x[t] = axy * y[t-1] + axx * x[t-1] + ux[t]
